@@ -1,0 +1,299 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blueprint Importer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; }
+    .row { margin: 12px 0; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    input[type="text"], textarea { width:100%; padding:10px; font-size:16px; box-sizing:border-box; }
+    textarea { min-height:220px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    button { padding:10px 14px; font-size:16px; cursor:pointer; margin-right:8px; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .muted { color:#555; font-size:14px; }
+    .preview { max-width:100%; border-radius:12px; border:1px solid #ddd; margin-top:8px; }
+    .status { white-space:pre-wrap; background:#f6f6f6; padding:12px; border-radius:10px; }
+    .progressWrap { margin-top:10px; background:#eee; border-radius:999px; overflow:hidden; height:14px; }
+    .progressBar { height:14px; width:0%; background:#333; transition: width 120ms linear; }
+    .logBox { margin-top:10px; padding:10px; border:1px solid #ddd; border-radius:10px; background:#fff;
+              max-height:180px; overflow:auto; font-family: ui-monospace, monospace; font-size:12px; white-space:pre-wrap; }
+    .toggle { display:inline-flex; gap:8px; align-items:center; user-select:none; margin-top:10px; }
+  </style>
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
+  <div class="muted">Runs OCR locally in your browser. Then uploads the extracted list to your Google Sheet via Apps Script.</div>
+
+  <div class="row">
+    <label>Apps Script Web App URL (your /exec)</label>
+    <input id="apiUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" />
+    <div class="muted">Tip: paste the URL from Deploy → Web app.</div>
+  </div>
+
+  <div class="row">
+    <label>MetaForge username (required)</label>
+    <input id="username" type="text" placeholder="e.g. chrisfrommlet" />
+  </div>
+
+  <div class="row">
+    <label>Optional shared key</label>
+    <input id="secret" type="text" placeholder="only if you set SHARED_SECRET" />
+  </div>
+
+  <div class="row">
+    <label>Upload “Needed Blueprints” image</label>
+    <input id="file" type="file" accept="image/*" />
+    <img id="imgPreview" class="preview" style="display:none;" />
+  </div>
+
+  <div class="row">
+    <button id="extractBtn" disabled>1) Extract</button>
+    <button id="sendBtn" disabled>2) Send to Sheet</button>
+
+    <label class="toggle">
+      <input id="verbose" type="checkbox" checked /> Verbose logs
+    </label>
+
+    <div id="progressArea" style="display:none;">
+      <div class="progressWrap"><div id="progressBar" class="progressBar"></div></div>
+      <div class="muted"><strong>Stage:</strong> <span id="stage">—</span> | <strong>Progress:</strong> <span id="pct">0%</span></div>
+      <div id="logBox" class="logBox" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label>Extracted blueprint names (one per line)</label>
+    <textarea id="list" placeholder="Run extraction first…"></textarea>
+  </div>
+
+  <div class="row status" id="status">Status: waiting…</div>
+
+<script>
+  const els = {
+    apiUrl: document.getElementById('apiUrl'),
+    username: document.getElementById('username'),
+    secret: document.getElementById('secret'),
+    file: document.getElementById('file'),
+    preview: document.getElementById('imgPreview'),
+    extractBtn: document.getElementById('extractBtn'),
+    sendBtn: document.getElementById('sendBtn'),
+    list: document.getElementById('list'),
+    status: document.getElementById('status'),
+    verbose: document.getElementById('verbose'),
+    progressArea: document.getElementById('progressArea'),
+    progressBar: document.getElementById('progressBar'),
+    stage: document.getElementById('stage'),
+    pct: document.getElementById('pct'),
+    logBox: document.getElementById('logBox'),
+  };
+
+  let loadedImage = null;
+
+  function setStatus(msg){ els.status.textContent = "Status: " + msg; }
+  function setStage(s){ els.stage.textContent = s; }
+  function setProgress(p){
+    const c = Math.max(0, Math.min(1, p));
+    const pct = Math.round(c * 100);
+    els.pct.textContent = pct + "%";
+    els.progressBar.style.width = pct + "%";
+  }
+  function log(line){
+    if (!els.verbose.checked) return;
+    els.logBox.style.display = 'block';
+    els.logBox.textContent += line + "\n";
+    els.logBox.scrollTop = els.logBox.scrollHeight;
+  }
+  els.verbose.addEventListener('change', ()=> {
+    els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
+  });
+
+  function updateButtons() {
+    const ok = !!els.apiUrl.value.trim() && !!els.username.value.trim() && !!loadedImage;
+    els.extractBtn.disabled = !ok;
+    els.sendBtn.disabled = !els.list.value.trim() || !els.apiUrl.value.trim() || !els.username.value.trim();
+  }
+  els.apiUrl.addEventListener('input', updateButtons);
+  els.username.addEventListener('input', updateButtons);
+  els.list.addEventListener('input', updateButtons);
+
+  els.file.addEventListener('change', () => {
+    const file = els.file.files[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      loadedImage = img;
+      els.preview.src = url;
+      els.preview.style.display = 'block';
+      els.list.value = '';
+      setStatus("Image loaded.");
+      updateButtons();
+    };
+    img.onerror = () => setStatus("Failed to load image.");
+    img.src = url;
+  });
+
+  function preprocessToCanvas(img) {
+    const srcW = img.naturalWidth || img.width;
+    const srcH = img.naturalHeight || img.height;
+
+    const MAX_W = 1800;
+    const scale = Math.min(1, MAX_W / srcW);
+    const w = Math.round(srcW * scale);
+    const h = Math.round(srcH * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, w, h);
+
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const d = imageData.data;
+    const threshold = 135;
+
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i+1], b = d[i+2];
+      const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+      const v = (lum > threshold) ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = v;
+      d[i+3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    log(`[preprocess] ${srcW}x${srcH} → ${w}x${h}`);
+    return canvas;
+  }
+
+  function titleCaseWord(w){ return w ? (w[0].toUpperCase() + w.slice(1).toLowerCase()) : w; }
+
+  function parseBlueprintLines(rawText) {
+    const lines = rawText.split('\n').map(s=>s.trim()).filter(Boolean);
+
+    const filtered = [];
+    for (const line of lines) {
+      if (/^metaforge$/i.test(line)) continue;
+      if (/^needed\s+blueprints\s*:\s*\d+/i.test(line)) continue;
+      filtered.push(line);
+    }
+
+    const out = [];
+    for (let i=0; i<filtered.length; i++) {
+      const cur = filtered[i];
+      const next = filtered[i+1];
+
+      if (/^(flanking|aggressive)$/i.test(cur) && next && /^combat\s+mk\.?\s*3$/i.test(next)) {
+        out.push(`${next.replace(/\s+/g,' ').trim()} (${titleCaseWord(cur)})`); i++; continue;
+      }
+      if (/^not[-\s]?in[-\s]?game$/i.test(cur) && next && next.length <= 16) {
+        out.push(`not-in-game ${next}`); i++; continue;
+      }
+      if (next && /^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(next) &&
+          !/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) {
+        out.push(`${cur} ${next.toUpperCase()}`); i++; continue;
+      }
+      if (next && /^[A-Za-z]{1,2}$/.test(next) && cur.length >= 3) {
+        out.push(`${cur} ${next}`); i++; continue;
+      }
+      if (/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) continue;
+
+      out.push(cur);
+    }
+
+    const seen = new Set();
+    const final = [];
+    for (const n of out) {
+      const s = n.trim().replace(/\s+/g,' ');
+      const k = s.toLowerCase();
+      if (!s || seen.has(k)) continue;
+      seen.add(k);
+      final.push(s);
+    }
+    return final;
+  }
+
+  els.extractBtn.addEventListener('click', async () => {
+    els.logBox.textContent = '';
+    els.progressArea.style.display = 'block';
+    els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
+    setStage('Preprocessing'); setProgress(0.05);
+    setStatus('Preprocessing image…');
+
+    try {
+      const canvas = preprocessToCanvas(loadedImage);
+
+      setStage('Creating worker'); setProgress(0.10);
+      log('[init] createWorker');
+
+      const worker = await Tesseract.createWorker({
+        logger: m => {
+          const stage = m.status || 'working';
+          const prog = (typeof m.progress === 'number') ? m.progress : 0;
+          setStage(stage);
+          setProgress(0.10 + 0.85 * prog);
+          log(`[${stage}] ${Math.round(prog*100)}%`);
+        },
+      });
+
+      try {
+        setStage('Loading language'); setProgress(0.20);
+        await worker.loadLanguage('eng');
+        setStage('Initializing'); setProgress(0.25);
+        await worker.initialize('eng');
+        await worker.setParameters({
+          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
+        });
+
+        setStage('Recognizing'); setStatus('Running OCR…');
+        const { data } = await worker.recognize(canvas);
+
+        setStage('Parsing'); setProgress(0.96);
+        const names = parseBlueprintLines(data?.text || '');
+        els.list.value = names.join('\n');
+
+        setStage('Done'); setProgress(1.0);
+        setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
+        updateButtons();
+      } finally {
+        await worker.terminate();
+      }
+
+    } catch (e) {
+      setStatus('OCR failed: ' + (e?.message || String(e)));
+      log('[error] ' + (e?.stack || e?.message || String(e)));
+    }
+  });
+
+  els.sendBtn.addEventListener('click', async () => {
+    const apiUrl = els.apiUrl.value.trim();
+    const username = els.username.value.trim();
+    const secret = els.secret.value;
+
+    if (!apiUrl || !username) { setStatus('API URL and username are required.'); return; }
+
+    const blueprints = els.list.value.split('\n').map(s=>s.trim()).filter(Boolean);
+    if (!blueprints.length) { setStatus('Nothing to send.'); return; }
+
+    setStatus('Sending to Google Sheet…');
+
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, blueprints, secret }),
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) {
+      setStatus('Import failed: ' + (json.error || 'Unknown error'));
+      return;
+    }
+    setStatus(`Done! Tab: ${json.tabName} | Wrote ${json.count} rows (overwritten).`);
+  });
+
+  // initial state
+  updateButtons();
+</script>
+</body>
+</html>
