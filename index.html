@@ -3,65 +3,136 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Blueprint Importer</title>
+  <title>ARC Raiders Blueprint Importer</title>
+
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 920px; margin: 40px auto; padding: 0 16px; }
+    :root{
+      --bg:#1f1f1f;
+      --panel:#262626;
+      --panel2:#2c2c2c;
+      --text:#eaeaea;
+      --muted:#b7b7b7;
+      --border:#3a3a3a;
+      --accent:#7aa7ff;
+      --good:#7dffb3;
+      --bad:#ff7d7d;
+    }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 920px;
+      margin: 40px auto;
+      padding: 0 16px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h2 { margin-bottom: 6px; }
     .row { margin: 12px 0; }
-    label { display:block; font-weight:600; margin-bottom:6px; }
-    input[type="text"], textarea, select { width:100%; padding:10px; font-size:16px; box-sizing:border-box; }
-    textarea { min-height:220px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    button { padding:10px 14px; font-size:16px; cursor:pointer; margin-right:8px; }
-    button:disabled { opacity:.6; cursor:not-allowed; }
-    .muted { color:#555; font-size:14px; }
-    .preview { max-width:100%; border-radius:12px; border:1px solid #ddd; margin-top:8px; }
-    .status { white-space:pre-wrap; background:#f6f6f6; padding:12px; border-radius:10px; }
-    .progressWrap { margin-top:10px; background:#eee; border-radius:999px; overflow:hidden; height:14px; }
-    .progressBar { height:14px; width:0%; background:#333; transition: width 120ms linear; }
-    .logBox { margin-top:10px; padding:10px; border:1px solid #ddd; border-radius:10px; background:#fff;
-              max-height:220px; overflow:auto; font-family: ui-monospace, monospace; font-size:12px; white-space:pre-wrap; }
+    label { display:block; font-weight:600; margin-bottom:6px; color: var(--text); }
+    input[type="text"], textarea, select {
+      width:100%;
+      padding:10px;
+      font-size:16px;
+      box-sizing:border-box;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      outline: none;
+    }
+    input[type="text"]:focus, textarea:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(122,167,255,.15);
+    }
+    textarea {
+      min-height:220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    button {
+      padding:10px 14px;
+      font-size:16px;
+      cursor:pointer;
+      margin-right:8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--text);
+    }
+    button:hover { border-color: #4b4b4b; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .muted { color: var(--muted); font-size:14px; }
+    .preview { max-width:100%; border-radius:12px; border:1px solid var(--border); margin-top:8px; }
+    .status {
+      white-space:pre-wrap;
+      background: var(--panel);
+      padding:12px;
+      border-radius:10px;
+      border: 1px solid var(--border);
+    }
+    .progressWrap {
+      margin-top:10px;
+      background: #303030;
+      border-radius:999px;
+      overflow:hidden;
+      height:14px;
+      border: 1px solid var(--border);
+    }
+    .progressBar { height:14px; width:0%; background: var(--accent); transition: width 120ms linear; }
+    .logBox {
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--border);
+      border-radius:10px;
+      background: #1a1a1a;
+      max-height:220px;
+      overflow:auto;
+      font-family: ui-monospace, monospace;
+      font-size:12px;
+      white-space:pre-wrap;
+      color: #d6d6d6;
+    }
     .toggle { display:inline-flex; gap:8px; align-items:center; user-select:none; margin-top:10px; }
     .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
     @media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
-    .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#eee; font-size:12px; margin-left:8px; }
-    .warn { color:#8a3b00; }
+    code { background:#111; padding:2px 6px; border-radius:6px; border:1px solid var(--border); }
+    .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#111; border:1px solid var(--border); font-size:12px; margin-left:8px; color: var(--muted); }
+    a { color: var(--accent); }
   </style>
 
-  <!-- Pin version so worker/core expectations match -->
+  <!-- Pin v5 (matches v5 worker/core expectations) -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 </head>
+
 <body>
   <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
   <div class="muted">
-    Runs OCR locally in your browser (Web Worker + WASM). Then uploads the extracted list to your Google Sheet via Apps Script.
+    OCR runs locally in your browser (Worker + WASM). Then the extracted list is posted to your Google Sheet via Apps Script.
+  </div>
+
+  <div class="row">
+    <div class="muted">
+      Backend: <code id="apiLabel"></code>
+    </div>
   </div>
 
   <div class="row grid2">
     <div>
-      <label>Apps Script Web App URL (your /exec)</label>
-      <input id="apiUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" />
-      <div class="muted">Tip: paste the URL from Deploy → Web app.</div>
+      <label>MetaForge username (required)</label>
+      <input id="username" type="text" placeholder="e.g. frommlet" />
     </div>
-    <div>
-      <label>OCR asset mode <span class="pill" id="assetHint">CDN (recommended)</span></label>
-      <select id="assetMode">
-        <option value="cdn">Use CDN (recommended)</option>
-        <option value="local">Use this site’s /tess/ assets (GitHub Pages)</option>
-      </select>
-      <div class="muted">
-        If you use <b>local</b>, you must host worker/core/lang files under <code>/tess/</code>.
-        <span class="warn">If any file 404s, the worker will fail with “Unexpected token '&lt;'”.</span>
-      </div>
-    </div>
-  </div>
 
-  <div class="row">
-    <label>MetaForge username (required)</label>
-    <input id="username" type="text" placeholder="e.g. chrisfrommlet" />
+    <div>
+      <label>OCR asset mode <span class="pill" id="assetHint">LOCAL (/tess)</span></label>
+      <select id="assetMode">
+        <option value="local" selected>Use this site’s /tess/ assets (recommended)</option>
+        <option value="cdn">Use CDN assets</option>
+      </select>
+      <div class="muted">LOCAL uses your GitHub Pages files under <code>/tess/</code>. CDN is a fallback.</div>
+    </div>
   </div>
 
   <div class="row">
     <label>Optional shared key</label>
-    <input id="secret" type="text" placeholder="only if you set SHARED_SECRET" />
+    <input id="secret" type="text" placeholder="only if you set SHARED_SECRET in Code.gs" />
   </div>
 
   <div class="row">
@@ -94,8 +165,11 @@
   <div class="row status" id="status">Status: waiting…</div>
 
 <script>
+  // ✅ BAKED-IN backend URL (no textbox)
+  const API_URL = "https://script.google.com/macros/s/AKfycbxUWZEmHM26jUNhvKrRqL1qJt1HN5dOfvK6xz6F940lVWBCQeDxQAqCW87EoxsM9jPqyg/exec";
+
   const els = {
-    apiUrl: document.getElementById('apiUrl'),
+    apiLabel: document.getElementById('apiLabel'),
     username: document.getElementById('username'),
     secret: document.getElementById('secret'),
     file: document.getElementById('file'),
@@ -114,27 +188,27 @@
     assetHint: document.getElementById('assetHint'),
   };
 
-  // persist common fields
-  const LS = {
-    apiUrl: 'bpImporter_apiUrl',
-    username: 'bpImporter_username',
-    assetMode: 'bpImporter_assetMode',
-  };
-  els.apiUrl.value = localStorage.getItem(LS.apiUrl) || '';
-  els.username.value = localStorage.getItem(LS.username) || '';
-  els.assetMode.value = localStorage.getItem(LS.assetMode) || 'cdn';
+  els.apiLabel.textContent = API_URL;
 
-  function setAssetHint(){
-    els.assetHint.textContent = els.assetMode.value === 'cdn' ? 'CDN (recommended)' : 'Local /tess/';
+  // persist username + asset mode
+  const LS_USER = "bpImporter_username";
+  const LS_MODE = "bpImporter_assetMode";
+  els.username.value = localStorage.getItem(LS_USER) || "";
+  els.assetMode.value = localStorage.getItem(LS_MODE) || "local";
+
+  function setAssetHint() {
+    els.assetHint.textContent = (els.assetMode.value === "local") ? "LOCAL (/tess)" : "CDN";
   }
   setAssetHint();
 
-  els.apiUrl.addEventListener('input', () => localStorage.setItem(LS.apiUrl, els.apiUrl.value));
-  els.username.addEventListener('input', () => localStorage.setItem(LS.username, els.username.value));
-  els.assetMode.addEventListener('change', () => {
-    localStorage.setItem(LS.assetMode, els.assetMode.value);
-    setAssetHint();
+  els.username.addEventListener("input", () => {
+    localStorage.setItem(LS_USER, els.username.value);
     updateButtons();
+  });
+
+  els.assetMode.addEventListener("change", () => {
+    localStorage.setItem(LS_MODE, els.assetMode.value);
+    setAssetHint();
   });
 
   let loadedImage = null;
@@ -158,12 +232,10 @@
   });
 
   function updateButtons() {
-    const ok = !!els.apiUrl.value.trim() && !!els.username.value.trim() && !!loadedImage;
+    const ok = !!els.username.value.trim() && !!loadedImage;
     els.extractBtn.disabled = !ok;
-    els.sendBtn.disabled = !els.list.value.trim() || !els.apiUrl.value.trim() || !els.username.value.trim();
+    els.sendBtn.disabled = !els.list.value.trim() || !els.username.value.trim();
   }
-  els.apiUrl.addEventListener('input', updateButtons);
-  els.username.addEventListener('input', updateButtons);
   els.list.addEventListener('input', updateButtons);
 
   els.file.addEventListener('change', () => {
@@ -184,11 +256,62 @@
     img.src = url;
   });
 
+  async function assertFetch(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+    // Helpful early warning: JS returning HTML (404 page)
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (url.endsWith(".js") && ct.includes("text/html")) {
+      throw new Error(`Got HTML instead of JS for ${url} (check path/version)`);
+    }
+  }
+
+  async function withTimeout(promise, ms, msg) {
+    let t;
+    const timeout = new Promise((_, rej) => t = setTimeout(() => rej(new Error(msg)), ms));
+    const res = await Promise.race([promise, timeout]);
+    clearTimeout(t);
+    return res;
+  }
+
+  function getAssetConfig() {
+    if (els.assetMode.value === "cdn") {
+      return {
+        label: "CDN",
+        workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js",
+        corePath:   "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/",
+        langPath:   "https://tessdata.projectnaptha.com/4.0.0/",
+      };
+    }
+
+    // LOCAL (/tess) – GitHub Pages-safe absolute URLs
+    const base = new URL('.', window.location.href).toString(); // ends with /
+    return {
+      label: "LOCAL",
+      workerPath: base + "tess/worker.min.js",
+      corePath:   base + "tess/core/",
+      langPath:   base + "tess/lang/",
+    };
+  }
+
+  async function preflight(cfg) {
+    log(`[paths] mode=${cfg.label}`);
+    log(`[paths] workerPath: ${cfg.workerPath}`);
+    log(`[paths] corePath:   ${cfg.corePath}`);
+    log(`[paths] langPath:   ${cfg.langPath}`);
+
+    // minimal sanity checks (fast)
+    await assertFetch(cfg.workerPath);
+    await assertFetch(cfg.corePath + "tesseract-core.wasm.js");
+    await assertFetch(cfg.corePath + "tesseract-core.wasm");
+    await assertFetch(cfg.langPath + "eng.traineddata.gz");
+    log("[preflight] assets OK");
+  }
+
   function preprocessToCanvas(img) {
     const srcW = img.naturalWidth || img.width;
     const srcH = img.naturalHeight || img.height;
 
-    // keep reasonable so OCR startup doesn't get huge
     const MAX_W = 1800;
     const scale = Math.min(1, MAX_W / srcW);
     const w = Math.round(srcW * scale);
@@ -262,128 +385,62 @@
     return final;
   }
 
-  function getAssetConfig() {
-    const mode = els.assetMode.value;
-
-    // Ensure base ends with /
-    const base = new URL('.', location.href).toString();
-
-    if (mode === 'local') {
-      return {
-        label: 'LOCAL',
-        workerPath: base + 'tess/worker.min.js',
-        corePath:   base + 'tess/core/',
-        langPath:   base + 'tess/lang/',
-      };
-    }
-
-    // pinned versions to avoid mismatch
-    return {
-      label: 'CDN',
-      workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js',
-      corePath:   'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/',
-      langPath:   'https://tessdata.projectnaptha.com/4.0.0/', // provides eng.traineddata.gz
-    };
-  }
-
-  async function assertOk(url) {
-    const r = await fetch(url, { cache: 'no-store' });
-    if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-    // For JS files, a common failure is HTML 404 pages - detect quickly.
-    const ct = (r.headers.get('content-type') || '').toLowerCase();
-    if (url.endsWith('.js') && ct.includes('text/html')) {
-      throw new Error(`Got HTML instead of JS for ${url} (check path/version)`);
-    }
-  }
-
-  async function preflightAssets(cfg) {
-    log(`[paths] mode=${cfg.label}`);
-    log(`[paths] workerPath: ${cfg.workerPath}`);
-    log(`[paths] corePath:   ${cfg.corePath}`);
-    log(`[paths] langPath:   ${cfg.langPath}`);
-
-    // Core: tesseract.js selects best of these; have all available
-    const coreFiles = [
-      'tesseract-core.wasm.js',
-      'tesseract-core-simd.wasm.js',
-      'tesseract-core-lstm.wasm.js',
-      'tesseract-core-simd-lstm.wasm.js',
-
-      // and their corresponding wasm payloads
-      'tesseract-core.wasm',
-      'tesseract-core-simd.wasm',
-      'tesseract-core-lstm.wasm',
-      'tesseract-core-simd-lstm.wasm',
-    ];
-
-    setStage('Preflight'); setProgress(0.03);
-    await assertOk(cfg.workerPath);
-
-    setProgress(0.05);
-    for (let i = 0; i < coreFiles.length; i++) {
-      const u = cfg.corePath + coreFiles[i];
-      await assertOk(u);
-      if (i === 0) setProgress(0.06);
-    }
-
-    setProgress(0.07);
-    await assertOk(cfg.langPath + 'eng.traineddata.gz');
-
-    log('[preflight] assets OK');
-  }
-
   els.extractBtn.addEventListener('click', async () => {
     els.logBox.textContent = '';
     els.progressArea.style.display = 'block';
     els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
 
-    setStage('Preprocessing'); setProgress(0.05);
-    setStatus('Preprocessing image…');
-
-    const cfg = getAssetConfig();
+    const username = els.username.value.trim();
+    if (!username) { setStatus("Username is required."); return; }
+    if (!loadedImage) { setStatus("Please upload an image."); return; }
 
     try {
-      await preflightAssets(cfg);
+      setStage("Preflight"); setProgress(0.03);
+      setStatus("Checking OCR assets…");
 
+      const cfg = getAssetConfig();
+      await preflight(cfg);
+
+      setStage("Preprocessing"); setProgress(0.08);
+      setStatus("Preprocessing image…");
       const canvas = preprocessToCanvas(loadedImage);
 
-      setStage('Creating worker'); setProgress(0.10);
-      setStatus('Starting OCR engine…');
-      log('[init] createWorker(options)');
+      setStage("Creating worker"); setProgress(0.10);
+      setStatus("Starting OCR engine…");
 
-      const worker = await Tesseract.createWorker({
-        workerPath: cfg.workerPath,
-        corePath: cfg.corePath,
-        langPath: cfg.langPath,
-        logger: m => {
-          // m.status is fairly informative; progress is 0..1 when available
-          const stage = m.status || 'working';
-          const prog = (typeof m.progress === 'number') ? m.progress : 0;
-          setStage(stage);
-          setProgress(0.10 + 0.85 * prog);
-          if (m.status) log(`[${stage}] ${Math.round(prog*100)}%`);
-        },
-      });
+      // ✅ v5 API: createWorker(lang, oem, options). Old v4-style createWorker(options) can hang. :contentReference[oaicite:1]{index=1}
+      const worker = await withTimeout(
+        Tesseract.createWorker("eng", 1, {
+          workerPath: cfg.workerPath,
+          corePath: cfg.corePath,
+          langPath: cfg.langPath,
+          logger: (m) => {
+            const stage = m.status || "working";
+            const prog = (typeof m.progress === "number") ? m.progress : 0;
+            setStage(stage);
+            setProgress(0.10 + 0.85 * prog);
+            log(`[${stage}] ${Math.round(prog*100)}%`);
+          },
+        }),
+        45000,
+        "Tesseract worker start timed out. If this keeps happening, try switching asset mode (LOCAL/CDN) or check the browser console for a Worker/WASM error."
+      );
 
       try {
-        setStage('Loading language'); setProgress(0.20);
-        await worker.loadLanguage('eng');
-
-        setStage('Initializing'); setProgress(0.25);
-        await worker.initialize('eng');
-
+        // In v5 you don't need loadLanguage/initialize; worker is already initialized. :contentReference[oaicite:2]{index=2}
         await worker.setParameters({
           tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
         });
 
-        setStage('Recognizing'); setStatus('Running OCR…');
+        setStage("Recognizing"); setProgress(0.20);
+        setStatus("Running OCR…");
         const { data } = await worker.recognize(canvas);
 
-        setStage('Parsing'); setProgress(0.96);
-        const names = parseBlueprintLines(data?.text || '');
-        els.list.value = names.join('\n');
+        setStage("Parsing"); setProgress(0.97);
+        const names = parseBlueprintLines(data?.text || "");
+        els.list.value = names.join("\n");
 
-        setStage('Done'); setProgress(1.0);
+        setStage("Done"); setProgress(1.0);
         setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
         updateButtons();
       } finally {
@@ -392,44 +449,39 @@
 
     } catch (e) {
       const msg = e?.message || String(e);
-      setStatus('OCR failed: ' + msg);
-      log('[error] ' + (e?.stack || msg));
-
-      if (els.assetMode.value === 'local') {
-        log('');
-        log('Tip: In LOCAL mode, this usually means one of the /tess/* files is returning HTML (404/redirect) or versions are mismatched.');
-        log('Try switching OCR asset mode to "CDN (recommended)" and retry.');
-      }
+      setStatus("OCR failed: " + msg);
+      log("[error] " + (e?.stack || msg));
+      log("");
+      log("If it times out at 10% again, switch OCR asset mode (LOCAL/CDN) and retry.");
     }
   });
 
   els.sendBtn.addEventListener('click', async () => {
-    const apiUrl = els.apiUrl.value.trim();
     const username = els.username.value.trim();
     const secret = els.secret.value;
 
-    if (!apiUrl || !username) { setStatus('API URL and username are required.'); return; }
+    if (!username) { setStatus("Username is required."); return; }
 
-    const blueprints = els.list.value.split('\n').map(s=>s.trim()).filter(Boolean);
-    if (!blueprints.length) { setStatus('Nothing to send.'); return; }
+    const blueprints = els.list.value.split("\n").map(s=>s.trim()).filter(Boolean);
+    if (!blueprints.length) { setStatus("Nothing to send."); return; }
 
-    setStatus('Sending to Google Sheet…');
+    setStatus("Sending to Google Sheet…");
 
     try {
-      const res = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, blueprints, secret }),
       });
 
       const json = await res.json().catch(() => ({}));
       if (!json.ok) {
-        setStatus('Import failed: ' + (json.error || ('HTTP ' + res.status)));
+        setStatus("Import failed: " + (json.error || ("HTTP " + res.status)));
         return;
       }
       setStatus(`Done! Tab: ${json.tabName} | Wrote ${json.count} rows (overwritten).`);
     } catch (e) {
-      setStatus('Import failed: ' + (e?.message || String(e)));
+      setStatus("Import failed: " + (e?.message || String(e)));
     }
   });
 
