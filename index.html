@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Blueprint Importer</title>
+  <title>ARC Raiders Blueprint Importer</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; }
     .row { margin: 12px 0; }
@@ -20,22 +20,25 @@
     .logBox { margin-top:10px; padding:10px; border:1px solid #ddd; border-radius:10px; background:#fff;
               max-height:180px; overflow:auto; font-family: ui-monospace, monospace; font-size:12px; white-space:pre-wrap; }
     .toggle { display:inline-flex; gap:8px; align-items:center; user-select:none; margin-top:10px; }
+    code { background:#eee; padding:2px 6px; border-radius:6px; }
   </style>
-  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <!-- LOCAL tesseract -->
+  <script src="./tess/tesseract.min.js"></script>
 </head>
 <body>
   <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
-  <div class="muted">Runs OCR locally in your browser. Then uploads the extracted list to your Google Sheet via Apps Script.</div>
+  <div class="muted">
+    OCR runs locally in your browser. Then the extracted list is sent to your Apps Script endpoint.
+  </div>
 
-  <div class="row">
-    <label>Apps Script Web App URL (your /exec)</label>
-    <input id="apiUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" />
-    <div class="muted">Tip: paste the URL from Deploy → Web app.</div>
+  <div class="row muted">
+    Backend: <code id="apiLabel"></code>
   </div>
 
   <div class="row">
     <label>MetaForge username (required)</label>
-    <input id="username" type="text" placeholder="e.g. chrisfrommlet" />
+    <input id="username" type="text" placeholder="e.g. frommlet" />
   </div>
 
   <div class="row">
@@ -72,8 +75,16 @@
   <div class="row status" id="status">Status: waiting…</div>
 
 <script>
+  // ✅ Your Apps Script endpoint baked in:
+  const API_URL = "https://script.google.com/macros/s/AKfycbxUWZEmHM26jUNhvKrRqL1qJt1HN5dOfvK6xz6F940lVWBCQeDxQAqCW87EoxsM9jPqyg/exec";
+
+  // ✅ Local asset paths (served by GitHub Pages repo)
+  const TESS_WORKER_PATH = "./tess/worker.min.js";
+  const TESS_CORE_PATH   = "./tess/core/";   // directory containing all core variants + wasm
+  const TESS_LANG_PATH   = "./tess/lang/";   // directory containing eng.traineddata.gz
+
   const els = {
-    apiUrl: document.getElementById('apiUrl'),
+    apiLabel: document.getElementById('apiLabel'),
     username: document.getElementById('username'),
     secret: document.getElementById('secret'),
     file: document.getElementById('file'),
@@ -89,6 +100,8 @@
     pct: document.getElementById('pct'),
     logBox: document.getElementById('logBox'),
   };
+
+  els.apiLabel.textContent = API_URL;
 
   let loadedImage = null;
 
@@ -111,11 +124,10 @@
   });
 
   function updateButtons() {
-    const ok = !!els.apiUrl.value.trim() && !!els.username.value.trim() && !!loadedImage;
+    const ok = !!els.username.value.trim() && !!loadedImage;
     els.extractBtn.disabled = !ok;
-    els.sendBtn.disabled = !els.list.value.trim() || !els.apiUrl.value.trim() || !els.username.value.trim();
+    els.sendBtn.disabled = !els.list.value.trim() || !els.username.value.trim();
   }
-  els.apiUrl.addEventListener('input', updateButtons);
   els.username.addEventListener('input', updateButtons);
   els.list.addEventListener('input', updateButtons);
 
@@ -136,6 +148,20 @@
     img.onerror = () => setStatus("Failed to load image.");
     img.src = url;
   });
+
+  async function withTimeout(promise, ms, msg) {
+    let t;
+    const timeout = new Promise((_, rej) => t = setTimeout(() => rej(new Error(msg)), ms));
+    const res = await Promise.race([promise, timeout]);
+    clearTimeout(t);
+    return res;
+  }
+
+  async function assertFetch(url) {
+    // Preflight to fail fast if files are 404 or blocked.
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+  }
 
   function preprocessToCanvas(img) {
     const srcW = img.naturalWidth || img.width;
@@ -215,45 +241,73 @@
   }
 
   els.extractBtn.addEventListener('click', async () => {
+    if (!els.username.value.trim()) { setStatus("Username is required."); return; }
+
     els.logBox.textContent = '';
     els.progressArea.style.display = 'block';
     els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
-    setStage('Preprocessing'); setProgress(0.05);
-    setStatus('Preprocessing image…');
+
+    setStage('Preflight (checking local assets)');
+    setProgress(0.03);
+    setStatus('Checking OCR assets…');
 
     try {
+      // Fail fast if any critical file is missing (404).
+      await assertFetch(TESS_WORKER_PATH);
+      await assertFetch(TESS_CORE_PATH + "tesseract-core.wasm.js");
+      await assertFetch(TESS_LANG_PATH + "eng.traineddata.gz"); // langPath + 'eng' + '.traineddata.gz' :contentReference[oaicite:3]{index=3}
+
+      setStage('Preprocessing');
+      setProgress(0.08);
+      setStatus('Preprocessing image…');
       const canvas = preprocessToCanvas(loadedImage);
 
-      setStage('Creating worker'); setProgress(0.10);
-      log('[init] createWorker');
+      setStage('Creating worker');
+      setProgress(0.10);
+      log('[init] createWorker (local assets)');
 
-      const worker = await Tesseract.createWorker({
-        logger: m => {
-          const stage = m.status || 'working';
-          const prog = (typeof m.progress === 'number') ? m.progress : 0;
-          setStage(stage);
-          setProgress(0.10 + 0.85 * prog);
-          log(`[${stage}] ${Math.round(prog*100)}%`);
-        },
-      });
+      const worker = await withTimeout(
+        Tesseract.createWorker({
+          logger: m => {
+            const stage = m.status || 'working';
+            const prog = (typeof m.progress === 'number') ? m.progress : 0;
+            setStage(stage);
+            setProgress(0.10 + 0.85 * prog);
+            log(`[${stage}] ${Math.round(prog*100)}%`);
+          },
+          // Using local worker file directly (no blob wrapper)
+          workerBlobURL: false,
+          workerPath: TESS_WORKER_PATH,
+          corePath: TESS_CORE_PATH,
+          langPath: TESS_LANG_PATH,
+        }),
+        20000,
+        "Worker didn't start (check that /tess/* files exist and are reachable)."
+      );
 
       try {
-        setStage('Loading language'); setProgress(0.20);
+        setStage('Loading language');
+        setProgress(0.20);
         await worker.loadLanguage('eng');
-        setStage('Initializing'); setProgress(0.25);
+        setStage('Initializing');
+        setProgress(0.25);
         await worker.initialize('eng');
+
         await worker.setParameters({
           tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
         });
 
-        setStage('Recognizing'); setStatus('Running OCR…');
+        setStage('Recognizing');
+        setStatus('Running OCR…');
         const { data } = await worker.recognize(canvas);
 
-        setStage('Parsing'); setProgress(0.96);
+        setStage('Parsing');
+        setProgress(0.96);
         const names = parseBlueprintLines(data?.text || '');
         els.list.value = names.join('\n');
 
-        setStage('Done'); setProgress(1.0);
+        setStage('Done');
+        setProgress(1.0);
         setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
         updateButtons();
       } finally {
@@ -267,18 +321,16 @@
   });
 
   els.sendBtn.addEventListener('click', async () => {
-    const apiUrl = els.apiUrl.value.trim();
     const username = els.username.value.trim();
     const secret = els.secret.value;
-
-    if (!apiUrl || !username) { setStatus('API URL and username are required.'); return; }
+    if (!username) { setStatus("Username is required."); return; }
 
     const blueprints = els.list.value.split('\n').map(s=>s.trim()).filter(Boolean);
     if (!blueprints.length) { setStatus('Nothing to send.'); return; }
 
     setStatus('Sending to Google Sheet…');
 
-    const res = await fetch(apiUrl, {
+    const res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, blueprints, secret }),
@@ -292,7 +344,6 @@
     setStatus(`Done! Tab: ${json.tabName} | Wrote ${json.count} rows (overwritten).`);
   });
 
-  // initial state
   updateButtons();
 </script>
 </body>
