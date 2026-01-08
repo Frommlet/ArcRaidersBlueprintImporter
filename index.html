@@ -14,8 +14,6 @@
       --muted:#b7b7b7;
       --border:#3a3a3a;
       --accent:#7aa7ff;
-      --good:#7dffb3;
-      --bad:#ff7d7d;
     }
     body {
       font-family: system-ui, sans-serif;
@@ -83,7 +81,7 @@
       border:1px solid var(--border);
       border-radius:10px;
       background: #1a1a1a;
-      max-height:220px;
+      max-height:240px;
       overflow:auto;
       font-family: ui-monospace, monospace;
       font-size:12px;
@@ -95,23 +93,18 @@
     @media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
     code { background:#111; padding:2px 6px; border-radius:6px; border:1px solid var(--border); }
     .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#111; border:1px solid var(--border); font-size:12px; margin-left:8px; color: var(--muted); }
-    a { color: var(--accent); }
   </style>
 
-  <!-- Pin v5 (matches v5 worker/core expectations) -->
+  <!-- Pin v5 library -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 </head>
 
 <body>
   <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
-  <div class="muted">
-    OCR runs locally in your browser (Worker + WASM). Then the extracted list is posted to your Google Sheet via Apps Script.
-  </div>
+  <div class="muted">OCR runs locally in your browser (Worker + WASM). Then the list is posted to your Google Sheet via Apps Script.</div>
 
   <div class="row">
-    <div class="muted">
-      Backend: <code id="apiLabel"></code>
-    </div>
+    <div class="muted">Backend: <code id="apiLabel"></code></div>
   </div>
 
   <div class="row grid2">
@@ -119,14 +112,13 @@
       <label>MetaForge username (required)</label>
       <input id="username" type="text" placeholder="e.g. frommlet" />
     </div>
-
     <div>
       <label>OCR asset mode <span class="pill" id="assetHint">LOCAL (/tess)</span></label>
       <select id="assetMode">
-        <option value="local" selected>Use this site’s /tess/ assets (recommended)</option>
-        <option value="cdn">Use CDN assets</option>
+        <option value="local" selected>Use this site’s /tess/ assets</option>
+        <option value="cdn">Use pinned CDN assets</option>
       </select>
-      <div class="muted">LOCAL uses your GitHub Pages files under <code>/tess/</code>. CDN is a fallback.</div>
+      <div class="muted">If LOCAL fails, the app will auto-retry with CDN.</div>
     </div>
   </div>
 
@@ -165,7 +157,7 @@
   <div class="row status" id="status">Status: waiting…</div>
 
 <script>
-  // ✅ BAKED-IN backend URL (no textbox)
+  // ✅ baked-in Apps Script endpoint (no textbox)
   const API_URL = "https://script.google.com/macros/s/AKfycbxUWZEmHM26jUNhvKrRqL1qJt1HN5dOfvK6xz6F940lVWBCQeDxQAqCW87EoxsM9jPqyg/exec";
 
   const els = {
@@ -256,16 +248,6 @@
     img.src = url;
   });
 
-  async function assertFetch(url) {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
-    // Helpful early warning: JS returning HTML (404 page)
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (url.endsWith(".js") && ct.includes("text/html")) {
-      throw new Error(`Got HTML instead of JS for ${url} (check path/version)`);
-    }
-  }
-
   async function withTimeout(promise, ms, msg) {
     let t;
     const timeout = new Promise((_, rej) => t = setTimeout(() => rej(new Error(msg)), ms));
@@ -274,8 +256,22 @@
     return res;
   }
 
-  function getAssetConfig() {
-    if (els.assetMode.value === "cdn") {
+  // Fetch and also detect "HTML masquerading as JS" (the cause of your '<' error)
+  async function assertNotHtml(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    // Some hosts don't set perfect types; do a cheap body sniff for HTML on JS files
+    if (url.endsWith(".js")) {
+      const head = (await res.text()).slice(0, 40).trim();
+      if (head.startsWith("<") || ct.includes("text/html")) {
+        throw new Error(`Got HTML instead of JS for ${url} (this causes "Unexpected token <")`);
+      }
+    }
+  }
+
+  function getAssetConfig(mode) {
+    if (mode === "cdn") {
       return {
         label: "CDN",
         workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js",
@@ -283,8 +279,6 @@
         langPath:   "https://tessdata.projectnaptha.com/4.0.0/",
       };
     }
-
-    // LOCAL (/tess) – GitHub Pages-safe absolute URLs
     const base = new URL('.', window.location.href).toString(); // ends with /
     return {
       label: "LOCAL",
@@ -294,17 +288,46 @@
     };
   }
 
-  async function preflight(cfg) {
+  async function preflightAllCoreVariants(cfg) {
     log(`[paths] mode=${cfg.label}`);
     log(`[paths] workerPath: ${cfg.workerPath}`);
     log(`[paths] corePath:   ${cfg.corePath}`);
     log(`[paths] langPath:   ${cfg.langPath}`);
 
-    // minimal sanity checks (fast)
-    await assertFetch(cfg.workerPath);
-    await assertFetch(cfg.corePath + "tesseract-core.wasm.js");
-    await assertFetch(cfg.corePath + "tesseract-core.wasm");
-    await assertFetch(cfg.langPath + "eng.traineddata.gz");
+    setStage("Preflight"); setProgress(0.03);
+    await assertNotHtml(cfg.workerPath);
+
+    // IMPORTANT: check all core wrapper JS files because Chrome may choose SIMD/LSTM
+    const coreJs = [
+      "tesseract-core.wasm.js",
+      "tesseract-core-simd.wasm.js",
+      "tesseract-core-lstm.wasm.js",
+      "tesseract-core-simd-lstm.wasm.js",
+    ];
+
+    let i = 0;
+    for (const f of coreJs) {
+      setStage("Preflight (core wrappers)"); setProgress(0.04 + (i / coreJs.length) * 0.03);
+      await assertNotHtml(cfg.corePath + f);
+      i++;
+    }
+
+    // Also ensure the wasm payloads exist (no HTML check needed here)
+    const coreWasm = [
+      "tesseract-core.wasm",
+      "tesseract-core-simd.wasm",
+      "tesseract-core-lstm.wasm",
+      "tesseract-core-simd-lstm.wasm",
+    ];
+    for (const f of coreWasm) {
+      const res = await fetch(cfg.corePath + f, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${cfg.corePath + f}`);
+    }
+
+    // language
+    const langRes = await fetch(cfg.langPath + "eng.traineddata.gz", { cache: "no-store" });
+    if (!langRes.ok) throw new Error(`HTTP ${langRes.status} for ${cfg.langPath}eng.traineddata.gz`);
+
     log("[preflight] assets OK");
   }
 
@@ -385,6 +408,55 @@
     return final;
   }
 
+  async function runOcrOnce(mode) {
+    const cfg = getAssetConfig(mode);
+    await preflightAllCoreVariants(cfg);
+
+    setStage("Preprocessing"); setProgress(0.10);
+    setStatus("Preprocessing image…");
+    const canvas = preprocessToCanvas(loadedImage);
+
+    setStage("Creating worker"); setProgress(0.12);
+    setStatus("Starting OCR engine…");
+
+    // ✅ v5 API: createWorker(lang, oem, options)
+    const worker = await withTimeout(
+      Tesseract.createWorker("eng", 1, {
+        workerPath: cfg.workerPath,
+        corePath: cfg.corePath,
+        langPath: cfg.langPath,
+        logger: (m) => {
+          const stage = m.status || "working";
+          const prog = (typeof m.progress === "number") ? m.progress : 0;
+          setStage(stage);
+          setProgress(0.12 + 0.83 * prog);
+          log(`[${stage}] ${Math.round(prog*100)}%`);
+        },
+      }),
+      45000,
+      "Worker start timed out."
+    );
+
+    try {
+      await worker.setParameters({
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
+      });
+
+      setStage("Recognizing"); setStatus("Running OCR…");
+      const { data } = await worker.recognize(canvas);
+
+      setStage("Parsing"); setProgress(0.98);
+      const names = parseBlueprintLines(data?.text || "");
+      els.list.value = names.join("\n");
+      updateButtons();
+
+      setStage("Done"); setProgress(1.0);
+      setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
+    } finally {
+      await worker.terminate();
+    }
+  }
+
   els.extractBtn.addEventListener('click', async () => {
     els.logBox.textContent = '';
     els.progressArea.style.display = 'block';
@@ -394,65 +466,36 @@
     if (!username) { setStatus("Username is required."); return; }
     if (!loadedImage) { setStatus("Please upload an image."); return; }
 
+    const preferred = els.assetMode.value;
+
     try {
-      setStage("Preflight"); setProgress(0.03);
-      setStatus("Checking OCR assets…");
-
-      const cfg = getAssetConfig();
-      await preflight(cfg);
-
-      setStage("Preprocessing"); setProgress(0.08);
-      setStatus("Preprocessing image…");
-      const canvas = preprocessToCanvas(loadedImage);
-
-      setStage("Creating worker"); setProgress(0.10);
-      setStatus("Starting OCR engine…");
-
-      // ✅ v5 API: createWorker(lang, oem, options). Old v4-style createWorker(options) can hang. :contentReference[oaicite:1]{index=1}
-      const worker = await withTimeout(
-        Tesseract.createWorker("eng", 1, {
-          workerPath: cfg.workerPath,
-          corePath: cfg.corePath,
-          langPath: cfg.langPath,
-          logger: (m) => {
-            const stage = m.status || "working";
-            const prog = (typeof m.progress === "number") ? m.progress : 0;
-            setStage(stage);
-            setProgress(0.10 + 0.85 * prog);
-            log(`[${stage}] ${Math.round(prog*100)}%`);
-          },
-        }),
-        45000,
-        "Tesseract worker start timed out. If this keeps happening, try switching asset mode (LOCAL/CDN) or check the browser console for a Worker/WASM error."
-      );
-
-      try {
-        // In v5 you don't need loadLanguage/initialize; worker is already initialized. :contentReference[oaicite:2]{index=2}
-        await worker.setParameters({
-          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
-        });
-
-        setStage("Recognizing"); setProgress(0.20);
-        setStatus("Running OCR…");
-        const { data } = await worker.recognize(canvas);
-
-        setStage("Parsing"); setProgress(0.97);
-        const names = parseBlueprintLines(data?.text || "");
-        els.list.value = names.join("\n");
-
-        setStage("Done"); setProgress(1.0);
-        setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
-        updateButtons();
-      } finally {
-        await worker.terminate();
-      }
-
+      await runOcrOnce(preferred);
     } catch (e) {
       const msg = e?.message || String(e);
-      setStatus("OCR failed: " + msg);
       log("[error] " + (e?.stack || msg));
-      log("");
-      log("If it times out at 10% again, switch OCR asset mode (LOCAL/CDN) and retry.");
+
+      // Auto-fallback: the '<' error means HTML came back for a JS import
+      const looksLikeHtmlImport = /Unexpected token\s*'</i.test(msg) || /importScripts/i.test(msg) || /Got HTML instead of JS/i.test(msg);
+
+      if (preferred === "local" && looksLikeHtmlImport) {
+        log("");
+        log("LOCAL mode core import returned HTML. Auto-retrying with CDN…");
+        setStatus("LOCAL assets failed (HTML returned for core). Retrying with CDN…");
+        els.assetMode.value = "cdn";
+        setAssetHint();
+
+        try {
+          await runOcrOnce("cdn");
+          return;
+        } catch (e2) {
+          const msg2 = e2?.message || String(e2);
+          setStatus("OCR failed (CDN also failed): " + msg2);
+          log("[error] " + (e2?.stack || msg2));
+          return;
+        }
+      }
+
+      setStatus("OCR failed: " + msg);
     }
   });
 
