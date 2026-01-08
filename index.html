@@ -23,19 +23,16 @@
     code { background:#eee; padding:2px 6px; border-radius:6px; }
   </style>
 
-  <!-- Use your locally hosted Tesseract bundle if you have it.
-       If not, CDN is fine; worker/core/lang will still be loaded from your repo because we set paths below. -->
+  <!-- v5 library -->
   <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 
 <body>
   <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
-  <div class="muted">
-    OCR runs locally in your browser. Then the extracted list is sent to Google Sheets via Apps Script.
-  </div>
+  <div class="muted">OCR runs locally in your browser. Then the extracted list is sent to Google Sheets via Apps Script.</div>
 
   <div class="row muted">
-    Backend (fixed): <code id="apiLabel"></code>
+    Backend: <code id="apiLabel"></code>
   </div>
 
   <div class="row">
@@ -45,7 +42,7 @@
 
   <div class="row">
     <label>Optional shared key</label>
-    <input id="secret" type="text" placeholder="only if you set SHARED_SECRET" />
+    <input id="secret" type="text" placeholder="only if you set SHARED_SECRET in Code.gs" />
   </div>
 
   <div class="row">
@@ -78,7 +75,7 @@
   <div class="row status" id="status">Status: waiting…</div>
 
 <script>
-  // ✅ Baked-in Apps Script endpoint (your /exec)
+  // ✅ baked in
   const API_URL = "https://script.google.com/macros/s/AKfycbxUWZEmHM26jUNhvKrRqL1qJt1HN5dOfvK6xz6F940lVWBCQeDxQAqCW87EoxsM9jPqyg/exec";
 
   const els = {
@@ -111,7 +108,6 @@
     els.pct.textContent = pct + "%";
     els.progressBar.style.width = pct + "%";
   }
-
   function log(line){
     if (!els.verbose.checked) return;
     els.logBox.style.display = 'block';
@@ -209,42 +205,24 @@
       const cur = filtered[i];
       const next = filtered[i+1];
 
-      // FLANKING / AGGRESSIVE + Combat Mk. 3
       if (/^(flanking|aggressive)$/i.test(cur) && next && /^combat\s+mk\.?\s*3$/i.test(next)) {
-        out.push(`${next.replace(/\s+/g,' ').trim()} (${titleCaseWord(cur)})`);
-        i++;
-        continue;
+        out.push(`${next.replace(/\s+/g,' ').trim()} (${titleCaseWord(cur)})`); i++; continue;
       }
-
-      // not-in-game + token
       if (/^not[-\s]?in[-\s]?game$/i.test(cur) && next && next.length <= 16) {
-        out.push(`not-in-game ${next}`);
-        i++;
-        continue;
+        out.push(`not-in-game ${next}`); i++; continue;
       }
-
-      // Name + roman numeral
       if (next && /^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(next) &&
           !/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) {
-        out.push(`${cur} ${next.toUpperCase()}`);
-        i++;
-        continue;
+        out.push(`${cur} ${next.toUpperCase()}`); i++; continue;
       }
-
-      // Name + 1-2 letter suffix
       if (next && /^[A-Za-z]{1,2}$/.test(next) && cur.length >= 3) {
-        out.push(`${cur} ${next}`);
-        i++;
-        continue;
+        out.push(`${cur} ${next}`); i++; continue;
       }
-
-      // drop lone numerals
       if (/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) continue;
 
       out.push(cur);
     }
 
-    // de-dupe
     const seen = new Set();
     const final = [];
     for (const n of out) {
@@ -260,67 +238,60 @@
   els.extractBtn.addEventListener('click', async () => {
     const username = els.username.value.trim();
     if (!username) { setStatus("Username is required."); return; }
-    if (!loadedImage) return;
+    if (!loadedImage) { setStatus("Please upload an image."); return; }
 
     els.logBox.textContent = '';
     els.progressArea.style.display = 'block';
     els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
 
-    setStage('Preprocessing'); setProgress(0.05);
-    setStatus('Preprocessing image…');
-
     try {
-      // ✅ Build repo-safe absolute URLs (works on GitHub Pages project sites)
+      // ✅ GitHub Pages-safe absolute URLs
       const base = new URL('.', window.location.href);
       const workerPath = new URL('tess/worker.min.js', base).toString();
-      const corePath   = new URL('tess/core/', base).toString();  // keep trailing slash
-      const langPath   = new URL('tess/lang/', base).toString();  // keep trailing slash
+      const corePath   = new URL('tess/core/', base).toString(); // trailing slash matters
+      const langPath   = new URL('tess/lang/', base).toString(); // trailing slash matters
 
       log('[paths] ' + workerPath);
       log('[paths] ' + corePath);
       log('[paths] ' + langPath);
 
-      // ✅ Fail fast if critical files are missing
-      setStage('Preflight (checking OCR assets)'); setProgress(0.07);
+      setStage('Preflight'); setProgress(0.06);
+      setStatus('Checking OCR assets…');
+
       await assertFetch(workerPath);
       await assertFetch(corePath + 'tesseract-core.wasm.js');
       await assertFetch(corePath + 'tesseract-core.wasm');
       await assertFetch(langPath + 'eng.traineddata.gz');
       log('[preflight] assets OK');
 
+      setStage('Preprocessing'); setProgress(0.10);
+      setStatus('Preprocessing image…');
       const canvas = preprocessToCanvas(loadedImage);
 
-      setStage('Creating worker'); setProgress(0.10);
-      log('[init] createWorker (using local worker/core/lang)');
+      setStage('Creating worker'); setProgress(0.12);
+      setStatus('Starting OCR engine…');
 
+      // ✅ v5 API: language + OEM go into createWorker(lang, oem, options)
+      // loadLanguage/initialize are not needed in v5. :contentReference[oaicite:1]{index=1}
       const worker = await withTimeout(
-        Tesseract.createWorker({
+        Tesseract.createWorker('eng', 1, {
           logger: m => {
             const stage = m.status || 'working';
             const prog = (typeof m.progress === 'number') ? m.progress : 0;
             setStage(stage);
-            setProgress(0.10 + 0.85 * prog);
+            setProgress(0.12 + 0.85 * prog);
             log(`[${stage}] ${Math.round(prog*100)}%`);
           },
-
-          // helps avoid blob-worker issues
           workerBlobURL: false,
-
           workerPath,
           corePath,
           langPath,
         }),
-        25000,
+        30000,
         "Worker didn't start. If assets are OK, this can be a browser restriction on workers/WASM."
       );
 
       try {
-        setStage('Loading language'); setProgress(0.20);
-        await worker.loadLanguage('eng');
-
-        setStage('Initializing'); setProgress(0.25);
-        await worker.initialize('eng');
-
         await worker.setParameters({
           tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
         });
@@ -328,7 +299,7 @@
         setStage('Recognizing'); setStatus('Running OCR…');
         const { data } = await worker.recognize(canvas);
 
-        setStage('Parsing'); setProgress(0.96);
+        setStage('Parsing'); setProgress(0.98);
         const names = parseBlueprintLines(data?.text || '');
         els.list.value = names.join('\n');
 
