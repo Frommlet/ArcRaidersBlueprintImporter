@@ -23,17 +23,19 @@
     code { background:#eee; padding:2px 6px; border-radius:6px; }
   </style>
 
-  <!-- LOCAL tesseract -->
-  <script src="./tess/tesseract.min.js"></script>
+  <!-- Use your locally hosted Tesseract bundle if you have it.
+       If not, CDN is fine; worker/core/lang will still be loaded from your repo because we set paths below. -->
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
+
 <body>
   <h2>ARC Raiders “Needed Blueprints” → Google Sheets</h2>
   <div class="muted">
-    OCR runs locally in your browser. Then the extracted list is sent to your Apps Script endpoint.
+    OCR runs locally in your browser. Then the extracted list is sent to Google Sheets via Apps Script.
   </div>
 
   <div class="row muted">
-    Backend: <code id="apiLabel"></code>
+    Backend (fixed): <code id="apiLabel"></code>
   </div>
 
   <div class="row">
@@ -70,18 +72,14 @@
   <div class="row">
     <label>Extracted blueprint names (one per line)</label>
     <textarea id="list" placeholder="Run extraction first…"></textarea>
+    <div class="muted">Tip: fix OCR mistakes here before sending.</div>
   </div>
 
   <div class="row status" id="status">Status: waiting…</div>
 
 <script>
-  // ✅ Your Apps Script endpoint baked in:
+  // ✅ Baked-in Apps Script endpoint (your /exec)
   const API_URL = "https://script.google.com/macros/s/AKfycbxUWZEmHM26jUNhvKrRqL1qJt1HN5dOfvK6xz6F940lVWBCQeDxQAqCW87EoxsM9jPqyg/exec";
-
-  // ✅ Local asset paths (served by GitHub Pages repo)
-  const TESS_WORKER_PATH = "./tess/worker.min.js";
-  const TESS_CORE_PATH   = "./tess/core/";   // directory containing all core variants + wasm
-  const TESS_LANG_PATH   = "./tess/lang/";   // directory containing eng.traineddata.gz
 
   const els = {
     apiLabel: document.getElementById('apiLabel'),
@@ -113,6 +111,7 @@
     els.pct.textContent = pct + "%";
     els.progressBar.style.width = pct + "%";
   }
+
   function log(line){
     if (!els.verbose.checked) return;
     els.logBox.style.display = 'block';
@@ -158,7 +157,6 @@
   }
 
   async function assertFetch(url) {
-    // Preflight to fail fast if files are 404 or blocked.
     const res = await fetch(url, { cache: "no-cache" });
     if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
   }
@@ -188,6 +186,7 @@
       d[i] = d[i+1] = d[i+2] = v;
       d[i+3] = 255;
     }
+
     ctx.putImageData(imageData, 0, 0);
     log(`[preprocess] ${srcW}x${srcH} → ${w}x${h}`);
     return canvas;
@@ -210,24 +209,42 @@
       const cur = filtered[i];
       const next = filtered[i+1];
 
+      // FLANKING / AGGRESSIVE + Combat Mk. 3
       if (/^(flanking|aggressive)$/i.test(cur) && next && /^combat\s+mk\.?\s*3$/i.test(next)) {
-        out.push(`${next.replace(/\s+/g,' ').trim()} (${titleCaseWord(cur)})`); i++; continue;
+        out.push(`${next.replace(/\s+/g,' ').trim()} (${titleCaseWord(cur)})`);
+        i++;
+        continue;
       }
+
+      // not-in-game + token
       if (/^not[-\s]?in[-\s]?game$/i.test(cur) && next && next.length <= 16) {
-        out.push(`not-in-game ${next}`); i++; continue;
+        out.push(`not-in-game ${next}`);
+        i++;
+        continue;
       }
+
+      // Name + roman numeral
       if (next && /^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(next) &&
           !/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) {
-        out.push(`${cur} ${next.toUpperCase()}`); i++; continue;
+        out.push(`${cur} ${next.toUpperCase()}`);
+        i++;
+        continue;
       }
+
+      // Name + 1-2 letter suffix
       if (next && /^[A-Za-z]{1,2}$/.test(next) && cur.length >= 3) {
-        out.push(`${cur} ${next}`); i++; continue;
+        out.push(`${cur} ${next}`);
+        i++;
+        continue;
       }
+
+      // drop lone numerals
       if (/^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/i.test(cur)) continue;
 
       out.push(cur);
     }
 
+    // de-dupe
     const seen = new Set();
     const final = [];
     for (const n of out) {
@@ -241,30 +258,40 @@
   }
 
   els.extractBtn.addEventListener('click', async () => {
-    if (!els.username.value.trim()) { setStatus("Username is required."); return; }
+    const username = els.username.value.trim();
+    if (!username) { setStatus("Username is required."); return; }
+    if (!loadedImage) return;
 
     els.logBox.textContent = '';
     els.progressArea.style.display = 'block';
     els.logBox.style.display = els.verbose.checked ? 'block' : 'none';
 
-    setStage('Preflight (checking local assets)');
-    setProgress(0.03);
-    setStatus('Checking OCR assets…');
+    setStage('Preprocessing'); setProgress(0.05);
+    setStatus('Preprocessing image…');
 
     try {
-      // Fail fast if any critical file is missing (404).
-      await assertFetch(TESS_WORKER_PATH);
-      await assertFetch(TESS_CORE_PATH + "tesseract-core.wasm.js");
-      await assertFetch(TESS_LANG_PATH + "eng.traineddata.gz"); // langPath + 'eng' + '.traineddata.gz' :contentReference[oaicite:3]{index=3}
+      // ✅ Build repo-safe absolute URLs (works on GitHub Pages project sites)
+      const base = new URL('.', window.location.href);
+      const workerPath = new URL('tess/worker.min.js', base).toString();
+      const corePath   = new URL('tess/core/', base).toString();  // keep trailing slash
+      const langPath   = new URL('tess/lang/', base).toString();  // keep trailing slash
 
-      setStage('Preprocessing');
-      setProgress(0.08);
-      setStatus('Preprocessing image…');
+      log('[paths] ' + workerPath);
+      log('[paths] ' + corePath);
+      log('[paths] ' + langPath);
+
+      // ✅ Fail fast if critical files are missing
+      setStage('Preflight (checking OCR assets)'); setProgress(0.07);
+      await assertFetch(workerPath);
+      await assertFetch(corePath + 'tesseract-core.wasm.js');
+      await assertFetch(corePath + 'tesseract-core.wasm');
+      await assertFetch(langPath + 'eng.traineddata.gz');
+      log('[preflight] assets OK');
+
       const canvas = preprocessToCanvas(loadedImage);
 
-      setStage('Creating worker');
-      setProgress(0.10);
-      log('[init] createWorker (local assets)');
+      setStage('Creating worker'); setProgress(0.10);
+      log('[init] createWorker (using local worker/core/lang)');
 
       const worker = await withTimeout(
         Tesseract.createWorker({
@@ -275,39 +302,37 @@
             setProgress(0.10 + 0.85 * prog);
             log(`[${stage}] ${Math.round(prog*100)}%`);
           },
-          // Using local worker file directly (no blob wrapper)
+
+          // helps avoid blob-worker issues
           workerBlobURL: false,
-          workerPath: TESS_WORKER_PATH,
-          corePath: TESS_CORE_PATH,
-          langPath: TESS_LANG_PATH,
+
+          workerPath,
+          corePath,
+          langPath,
         }),
-        20000,
-        "Worker didn't start (check that /tess/* files exist and are reachable)."
+        25000,
+        "Worker didn't start. If assets are OK, this can be a browser restriction on workers/WASM."
       );
 
       try {
-        setStage('Loading language');
-        setProgress(0.20);
+        setStage('Loading language'); setProgress(0.20);
         await worker.loadLanguage('eng');
-        setStage('Initializing');
-        setProgress(0.25);
+
+        setStage('Initializing'); setProgress(0.25);
         await worker.initialize('eng');
 
         await worker.setParameters({
           tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -().:_",
         });
 
-        setStage('Recognizing');
-        setStatus('Running OCR…');
+        setStage('Recognizing'); setStatus('Running OCR…');
         const { data } = await worker.recognize(canvas);
 
-        setStage('Parsing');
-        setProgress(0.96);
+        setStage('Parsing'); setProgress(0.96);
         const names = parseBlueprintLines(data?.text || '');
         els.list.value = names.join('\n');
 
-        setStage('Done');
-        setProgress(1.0);
+        setStage('Done'); setProgress(1.0);
         setStatus(`Extracted ${names.length} items. Review/edit, then Send.`);
         updateButtons();
       } finally {
@@ -323,7 +348,8 @@
   els.sendBtn.addEventListener('click', async () => {
     const username = els.username.value.trim();
     const secret = els.secret.value;
-    if (!username) { setStatus("Username is required."); return; }
+
+    if (!username) { setStatus('Username is required.'); return; }
 
     const blueprints = els.list.value.split('\n').map(s=>s.trim()).filter(Boolean);
     if (!blueprints.length) { setStatus('Nothing to send.'); return; }
